@@ -75,8 +75,7 @@ const __dirname = topLevelFileUrlToPath(new topLevelURL(".", import.meta.url))
 		Platform:   esbuild.PlatformNode,
 		Sourcemap:  esbuild.SourceMapLinked,
 		Stdin: &esbuild.StdinOptions{
-			// Replace all backslashes with forward slashes to avoid issues with windows paths
-			Contents:   strings.ReplaceAll(input.Code, "\\", "/"),
+			Contents:   input.Code,
 			ResolveDir: input.Dir,
 			Sourcefile: "eval.ts",
 			Loader:     esbuild.LoaderTS,
@@ -175,4 +174,3 @@ func Cleanup(result esbuild.BuildResult) {
 		os.Remove(file.Path)
 	}
 }
-
