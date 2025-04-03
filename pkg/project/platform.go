@@ -12,7 +12,6 @@ import (
 )
 
 func (p *Project) CheckPlatform(version string) bool {
-	return true
 	if version == "dev" {
 		currentExecutable, _ := os.Executable()
 		info, _ := os.Stat(currentExecutable)
