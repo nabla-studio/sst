@@ -181,7 +181,7 @@ func (p *Project) RunNext(ctx context.Context, input *StackInput) error {
       export default result;
     `,
 			filepath.ToSlash(path.Join(p.PathWorkingDir(), "platform/src/auto/run.ts")),
-			p.PathConfig(),
+			filepath.ToSlash(p.PathConfig()),
 		),
 	})
 	if err != nil {
