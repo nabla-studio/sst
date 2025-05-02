@@ -18,6 +18,11 @@ export interface D1Args {
   };
 }
 
+interface D1Ref {
+  ref: boolean;
+  database: cloudflare.D1Database;
+}
+
 /**
  * The `D1` component lets you add a [Cloudflare D1 database](https://developers.cloudflare.com/d1/) to
  * your app.
@@ -58,6 +63,12 @@ export class D1 extends Component implements Link.Linkable {
   constructor(name: string, args?: D1Args, opts?: ComponentResourceOptions) {
     super(__pulumiType, name, args, opts);
 
+    if (args && "ref" in args) {
+      const ref = args as D1Ref;
+      this.database = ref.database;
+      return;
+    }
+
     const parent = this;
 
     const db = createDB();
@@ -95,15 +106,31 @@ export class D1 extends Component implements Link.Linkable {
    * @internal
    */
   getSSTLink() {
+    // This is a workaround to correctly get the database id from the pulumi 
+    // output, as it is merged with the account id in the `id` string when the 
+    // database is imported statically.
+
+    // This workaround could be edited in the newer version of the pulumi 
+    // cloudflare provider as there is a new field `uuid` which should 
+    // always be equal to the database id and should never be merged with the
+    // account id.
+
+    const dbId = this.database.id.apply(id => {
+      // If id contains a slash, it's in the format "accountId/databaseId"
+      // so we extract just the database ID part.
+      // Otherwise, it's just the database ID.
+      return id.includes("/") ? id.split("/")[1] : id;
+    });
+
     return {
       properties: {
-        databaseId: this.database.id,
+        databaseId: dbId,
       },
       include: [
         binding({
           type: "d1DatabaseBindings",
           properties: {
-            databaseId: this.database.id,
+            databaseId: dbId,
           },
         }),
       ],
@@ -127,6 +154,60 @@ export class D1 extends Component implements Link.Linkable {
        */
       database: this.database,
     };
+  }
+
+    /**
+   * Reference an existing D1 Database with the given account ID and database 
+   * ID. This is useful when you create a D1 in one stage and want to share 
+   * it in another. It avoids having to create a new D1 Database in the other 
+   * stage.
+   *
+   * :::tip
+   * You can use the `static get` method to share D1 Databases across stages.
+   * :::
+   *
+   * @param name The name of the component.
+   * @param accountId The account ID of the existing D1 Database.
+   * @param databaseId The database ID of the existing D1 Database.
+   *
+   * @example
+   * Imagine you create a D1 Database in the `dev` stage. And in your personal
+   * stage `giorgio`, instead of creating a new database, you want to share the
+   * same database from `dev`.
+   *
+   * ```ts title="sst.config.ts"
+   * const d1 = $app.stage === "giorgio"
+   *   ? sst.cloudflare.D1.get("MyD1", "023e105f4ecef8ad9ca31a8372d0c353", "my-database")
+   *   : new sst.cloudflare.D1("MyD1");
+   * ```
+   *
+   * Here `023e105f4ecef8ad9ca31a8372d0c353` is the ID of the D1 Database 
+   * created in the `dev` stage and `my-database` is the name of the D1 
+   * Database.
+   * You can find these by outputting the D1 Database in the `dev` stage.
+   *
+   * ```ts title="sst.config.ts"
+   * return {
+   *   d1
+   * };
+   * ```
+   */
+  public static get(
+    name: string,
+    accountId: string,
+    databaseId: string,
+    opts?: ComponentResourceOptions,
+  ) {
+    const database = cloudflare.D1Database.get(
+      `${name}Database`,
+      `${accountId}/${databaseId}`,
+      undefined,
+      opts,
+    );
+    return new D1(name, {
+      ref: true,
+      database,
+    } as D1Args);
   }
 }
 
