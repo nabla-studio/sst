@@ -170,22 +170,25 @@ func New(input *ProjectConfig) (*Project, error) {
 	}
 
 	rootPath := filepath.Dir(input.Config)
+	tmp := filepath.Join(rootPath, ".sst")
+
+	pythonRuntime := python.New()
 
 	proj := &Project{
 		version: input.Version,
 		root:    rootPath,
 		config:  input.Config,
 		env:     map[string]string{},
-		Runtime: runtime.NewCollection(
-			input.Config,
-			node.New(input.Version),
-			worker.New(),
-			python.New(),
-			golang.New(),
-			rust.New(),
-		),
 	}
-	tmp := proj.PathWorkingDir()
+
+	proj.Runtime = runtime.NewCollection(
+		input.Config,
+		node.New(input.Version),
+		worker.New(),
+		pythonRuntime,
+		golang.New(),
+		rust.New(),
+	)
 
 	_, err := os.Stat(tmp)
 	if err != nil {
