@@ -22,11 +22,49 @@ import { Permission } from "../aws/permission.js";
 import { binding } from "./binding.js";
 import { DEFAULT_ACCOUNT_ID } from "./account-id.js";
 import { rpc } from "../rpc/rpc.js";
-import { VisibleError } from "../error";
 import { getContentType } from "../base/base-site";
 import { prefixName } from "../naming";
 import { existsAsync } from "../../util/fs";
 import { normalizeCompatibility } from "./helpers/compatibility.js";
+import { cfFetch } from "./helpers/fetch.js";
+
+export interface WorkerDurableObjectMigration {
+  /**
+   * A unique identifier for this migration.
+   */
+  tag: Input<string>;
+  /**
+   * New Durable Object classes backed by the legacy KV storage backend.
+   */
+  newClasses?: Input<Input<string>[]>;
+  /**
+   * New Durable Object classes backed by the SQLite storage backend.
+   */
+  newSqliteClasses?: Input<Input<string>[]>;
+  /**
+   * Durable Object classes to delete.
+   */
+  deletedClasses?: Input<Input<string>[]>;
+  /**
+   * Durable Object classes to rename.
+   */
+  renamedClasses?: Input<
+    Input<{
+      from: Input<string>;
+      to: Input<string>;
+    }>[]
+  >;
+  /**
+   * Durable Object classes to transfer from another script.
+   */
+  transferredClasses?: Input<
+    Input<{
+      from: Input<string>;
+      fromScript: Input<string>;
+      to: Input<string>;
+    }>[]
+  >;
+}
 
 export interface WorkerDomainArgs {
   /**
@@ -257,6 +295,53 @@ export interface WorkerArgs {
    * ```
    */
   environment?: Input<Record<string, Input<string>>>;
+  /**
+   * Durable Object migrations for this worker.
+   *
+   * This follows Wrangler's top-level `migrations` config. Keep the full,
+   * ordered migration history here; SST reads the Worker's current migration
+   * tag and uploads the pending migrations as Cloudflare's `oldTag`, `newTag`,
+   * and `steps` payload. If there is no current tag, SST uploads the full
+   * history as the initial migration payload. If the current tag is not in the
+   * configured history, SST follows Wrangler and uploads all configured
+   * migrations with the current tag as `oldTag`.
+   *
+   * Each migration needs a unique `tag`. Add a migration when you create,
+   * rename, delete, or transfer a Durable Object class. Updating code for an
+   * existing class does not require one.
+   *
+   * On the first deploy, add each new class with `newSqliteClasses`. For a
+   * rename, keep the original migration and append a new migration with
+   * `renamedClasses`. Do not declare the renamed class as a new class, or
+   * Cloudflare will reject the deploy or create a separate namespace.
+   *
+   * @example
+   * ```ts
+   * {
+   *   migrations: [{
+   *     tag: "v1",
+   *     newSqliteClasses: ["Counter"]
+   *   }]
+   * }
+   * ```
+   *
+   * @example
+   * ```ts
+   * {
+   *   migrations: [
+   *     {
+   *       tag: "v1",
+   *       newSqliteClasses: ["Counter"],
+   *     },
+   *     {
+   *       tag: "v2",
+   *       renamedClasses: [{ from: "Counter", to: "CounterV2" }],
+   *     },
+   *   ]
+   * }
+   * ```
+   */
+  migrations?: Input<Input<WorkerDurableObjectMigration>[]>;
   /** @internal */
   assets?: Input<{
     directory: Input<string>;
@@ -401,21 +486,24 @@ export class Worker extends Component implements Link.Linkable {
 
     const bindings = buildBindings();
     const iamCredentials = createAwsCredentials();
-    const buildInput = all([name, args.handler, args.build, compatibility]).apply(
-      async ([name, handler, build, compatibility]) => {
-        return {
-          functionID: name,
-          links: {},
-          handler,
-          runtime: "worker",
-          properties: {
-            accountID: accountId,
-            build,
-            compatibility,
-          },
-        };
-      },
-    );
+    const buildInput = all([
+      name,
+      args.handler,
+      args.build,
+      compatibility,
+    ]).apply(async ([name, handler, build, compatibility]) => {
+      return {
+        functionID: name,
+        links: {},
+        handler,
+        runtime: "worker",
+        properties: {
+          accountID: accountId,
+          build,
+          compatibility,
+        },
+      };
+    });
     const build = buildHandler();
     const script = createScript();
     const workerUrl = createWorkersUrl();
@@ -442,13 +530,7 @@ export class Worker extends Component implements Link.Linkable {
       },
     );
     this.registerOutputs({
-      _live: all([
-        name,
-        args.handler,
-        args.build,
-        compatibility,
-        dev,
-      ]).apply(
+      _live: all([name, args.handler, args.build, compatibility, dev]).apply(
         ([name, handler, build, compatibility, dev]) => {
           if (!dev) return undefined;
           return {
@@ -529,13 +611,14 @@ export class Worker extends Component implements Link.Linkable {
                     secretTextBindings: "secret_text",
                     queueBindings: "queue",
                     serviceBindings: "service",
+                    durableObjectNamespaceBindings: "durable_object_namespace",
                     kvNamespaceBindings: "kv_namespace",
                     d1DatabaseBindings: "d1",
                     r2BucketBindings: "r2_bucket",
                     hyperdriveBindings: "hyperdrive",
                     versionMetadataBindings: "version_metadata",
                     workflowBindings: "workflow",
-                    rateLimitBindings: "ratelimit"
+                    rateLimitBindings: "ratelimit",
                   }[b.binding],
                   name,
                   ...b.properties,
@@ -617,6 +700,92 @@ export class Worker extends Component implements Link.Linkable {
     }
 
     function createScript() {
+      // workers.dev URLs fail above 54 chars when previews are enabled
+      const scriptName = prefixName(54, `${name}Script`).toLowerCase();
+      const durableObjectMigrationState = args.migrations
+        ? all([args.migrations, accountId]).apply(
+            async ([migrations, accountId]) => {
+              const latest = migrations.at(-1);
+              if (!latest) {
+                return {
+                  migrationTag: undefined,
+                  migrations: undefined,
+                };
+              }
+
+              let currentTag: string | undefined;
+              try {
+                const published = await cfFetch<
+                  {
+                    id?: string;
+                    migration_tag?: string;
+                  }[]
+                >(`/accounts/${accountId}/workers/scripts`);
+                currentTag = published.result.find(
+                  (script) => script.id === scriptName,
+                )?.migration_tag;
+              } catch (error) {
+                const code =
+                  typeof error === "object" &&
+                  error !== null &&
+                  "errors" in error &&
+                  Array.isArray(error.errors) &&
+                  typeof error.errors[0]?.code === "number"
+                    ? error.errors[0].code
+                    : undefined;
+                // workers.api.error.service_not_found
+                const serviceNotFound = code === 10090;
+                // workers.api.error.environment_not_found
+                const environmentNotFound = code === 10092;
+
+                // Wrangler suppresses these not-found cases when reading the
+                // current migration tag; they mean this is the first deploy for
+                // the script/environment, so there is no remote tag yet.
+                if (!serviceNotFound && !environmentNotFound) {
+                  throw error;
+                }
+              }
+
+              if (currentTag) {
+                const foundIndex = migrations.findIndex(
+                  (migration) => migration.tag === currentTag,
+                );
+
+                if (foundIndex === migrations.length - 1) {
+                  return {
+                    migrationTag: currentTag,
+                    migrations: undefined,
+                  };
+                }
+
+                const pending =
+                  foundIndex === -1
+                    ? migrations
+                    : migrations.slice(foundIndex + 1);
+                const steps = pending.map(({ tag: _tag, ...step }) => step);
+
+                return {
+                  migrationTag: currentTag,
+                  migrations: {
+                    oldTag: currentTag,
+                    newTag: latest.tag,
+                    steps,
+                  },
+                };
+              }
+
+              const steps = migrations.map(({ tag: _tag, ...step }) => step);
+
+              return {
+                migrationTag: "",
+                migrations: {
+                  newTag: latest.tag,
+                  steps,
+                },
+              };
+            },
+          )
+        : undefined;
       const contentFilePath = build.apply((build) =>
         path.join(build.out, build.handler),
       );
@@ -625,10 +794,9 @@ export class Worker extends Component implements Link.Linkable {
           args.transform?.worker as Transform<cf.WorkersScriptArgs>,
           `${name}Script`,
           {
-            // workers.dev URLs fail above 54 chars when previews are enabled
-            scriptName: prefixName(54, `${name}Script`).toLowerCase(),
+            scriptName,
             mainModule: "placeholder",
-            accountId: accountId,
+            accountId,
             contentFile: contentFilePath,
             contentSha256: contentFilePath.apply(async (p) =>
               crypto
@@ -638,6 +806,16 @@ export class Worker extends Component implements Link.Linkable {
             ),
             compatibilityDate: compatibility.apply((value) => value.date),
             compatibilityFlags: compatibility.apply((value) => value.flags),
+            ...(durableObjectMigrationState
+              ? {
+                  migrations: durableObjectMigrationState.apply(
+                    (state) => state.migrations,
+                  ) as Input<cf.types.input.WorkersScriptMigrations>,
+                  migrationTag: durableObjectMigrationState.apply(
+                    (state) => state.migrationTag,
+                  ) as Input<string>,
+                }
+              : {}),
             assets: args.assets
               ? output(args.assets).apply(async (assets) => {
                   const directory = path.isAbsolute(assets.directory)
@@ -717,6 +895,7 @@ export class Worker extends Component implements Link.Linkable {
           accountId: accountId,
           scriptName: script.scriptName,
           enabled: urlEnabled,
+          etag: script.etag,
         },
         { parent },
       );

@@ -74,6 +74,15 @@ export interface HyperdriveBinding {
   };
 }
 
+export interface DurableObjectNamespaceBinding {
+  type: "durableObjectNamespaceBindings";
+  properties: {
+    className: Input<string>;
+    scriptName?: Input<string>;
+    environment?: Input<string>;
+  };
+}
+
 export interface VersionMetadataBinding {
   type: "versionMetadataBindings";
   properties: Record<string, never>;
@@ -111,6 +120,7 @@ export type Binding =
   | HyperdriveBinding
   | VersionMetadataBinding
   | WorkflowBinding
+  | DurableObjectNamespaceBinding
   | RateLimitBinding;
 
 export function binding<T extends Binding["type"]>(input: Binding & {}) {

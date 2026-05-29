@@ -344,6 +344,37 @@ func TestGenerate(t *testing.T) {
 		_, err = os.Stat(filepath.Join(ignored, "sst-env.d.ts"))
 		assert.True(t, os.IsNotExist(err))
 	})
+
+	t.Run("cloudflare durable object binding types", func(t *testing.T) {
+		dir := setupProject(t, map[string]string{})
+
+		pkg, _ := json.Marshal(map[string]interface{}{
+			"devDependencies": map[string]string{
+				"@cloudflare/workers-types": "^4.0.0",
+			},
+		})
+		os.WriteFile(filepath.Join(dir, "package.json"), pkg, 0644)
+
+		links := common.Links{
+			"Counter": {
+				Include: []common.LinkInclude{{
+					Type: "cloudflare.binding",
+					Other: map[string]interface{}{
+						"binding": "durableObjectNamespaceBindings",
+					},
+				}},
+			},
+		}
+
+		err := typescript.Generate(dir, links, nil)
+		require.NoError(t, err)
+
+		content, err := os.ReadFile(filepath.Join(dir, "sst-env.d.ts"))
+		require.NoError(t, err)
+
+		out := string(content)
+		assert.Contains(t, out, `"Counter": import("@cloudflare/workers-types").DurableObjectNamespace`)
+	})
 }
 
 func indexOf(s, substr string) int {
