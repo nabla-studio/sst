@@ -11,7 +11,6 @@ const sidebar = [
   { label: "Basics", slug: "docs/basics" },
   { label: "Examples", slug: "docs/examples" },
   { label: "Changelog", slug: "docs/changelog" },
-  { label: "Enterprise", slug: "docs/enterprise" },
   {
     label: "Get Started",
     collapsed: true,
